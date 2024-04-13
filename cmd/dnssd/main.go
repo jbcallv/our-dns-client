@@ -109,6 +109,10 @@ func processFile(path string, ch chan<- string) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// added for csv! Disable if first column is domain name
+		domain_information := strings.Split(line, ",")
+		line = domain_information[1]
 		ch <- line
 		i++
 	}
@@ -123,12 +127,11 @@ func main() {
 
 	var wg sync.WaitGroup
 	inch := make(chan string, opts.numWorkers)
-	outch := make(chan *string, opts.numWorkers)
+	outch := make(chan string, opts.numWorkers)
 	wg.Add(opts.numWorkers)
 
 	for i := 0; i < opts.numWorkers; i++ {
 		go func() {
-			fmt.Println("hihihi")
 			config := &dnsclient.Do53Config{
 				Config: dnsclient.Config{
 					RecursionDesired: true,
@@ -158,6 +161,7 @@ func main() {
 
 			for domainname := range inch {
 				var sb strings.Builder
+				sb.WriteString("\n" + domainname + "\n")
 
 				browsers, err := dnsclient.GetAllServiceBrowserDomains(c, domainname)
 				_ = err
@@ -203,7 +207,8 @@ func main() {
 				}
 
 				outputString := sb.String()
-				outch <- &outputString
+				//fmt.Printf(outputString)
+				outch <- outputString
 			}
 		}()
 	}
@@ -217,7 +222,7 @@ func main() {
 
 	numJobs := 0
 	for outString := range outch {
-		fmt.Printf(*outString)
+		fmt.Printf(outString)
 		numJobs += 1
 	}
 
