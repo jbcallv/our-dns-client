@@ -169,7 +169,7 @@ func main() {
 					// fmt -> stringbuilder for outch
 					sb.WriteString("Service Browser Domains:\n")
 					for _, browser := range browsers {
-						fmt.Fprintf(&sb, "\t%s\n", browser)
+						sb.WriteString(fmt.Sprintf("\t%s\n", browser)) // sprintf returns string
 					}
 				} else {
 					// if we don't find any browsing domains, treat the original
@@ -191,7 +191,7 @@ func main() {
 				if len(services) != 0 {
 					sb.WriteString("Services:\n")
 					for _, service := range serviceSet.Items() {
-						fmt.Fprintf(&sb, "\t%s\n", service)
+						sb.WriteString(fmt.Sprintf("\t%s\n", service))
 						instances, err := dnsclient.GetServiceInstances(c, service)
 						if err != nil {
 							continue
@@ -201,13 +201,12 @@ func main() {
 							if err != nil {
 								continue
 							}
-							fmt.Fprintf(&sb, "\t\t%v\n", info)
+							sb.WriteString(fmt.Sprintf("\t\t%v\n", info))
 						}
 					}
 				}
 
 				outputString := sb.String()
-				//fmt.Printf(outputString)
 				outch <- outputString
 			}
 		}()
