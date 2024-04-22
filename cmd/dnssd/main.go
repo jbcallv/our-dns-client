@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"sync"
@@ -17,6 +19,10 @@ import (
 	"github.com/syslab-wm/dnsclient/internal/defaults"
 	"github.com/syslab-wm/dnsclient/internal/netx"
 	"github.com/syslab-wm/mu"
+
+	"github.com/joho/godotenv"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 const usage = `Usage: dnssd [options] DOMAIN
@@ -42,8 +48,11 @@ positional arguments:
 
     Default: 2s
 
-  -num-workers
+  -num-workers NUM-WORKERS
     Number of goroutines to launch
+
+  -collection COLLECTION
+	MongoDB collection to insert into
 
   -help
     Display this usage statement and exit.
@@ -61,6 +70,22 @@ type Options struct {
 	timeout    time.Duration
 	numWorkers int
 	inputFile  string
+	collection string
+}
+
+type Service struct {
+	Name     string
+	Priority uint16
+	Weight   uint16
+	Port     uint16
+	Target   string
+	Txt      []string
+}
+
+type ServiceDiscovery struct {
+	Domain          string
+	BrowsingDomains []string
+	Services        []Service
 }
 
 func printUsage() {
@@ -83,7 +108,7 @@ func parseOptions() *Options {
 	flag.BoolVar(&opts.tcp, "tcp", false, "")
 	flag.IntVar(&opts.numWorkers, "num-workers", 1, "")
 	flag.DurationVar(&opts.timeout, "timeout", defaults.Timeout, "")
-
+	flag.StringVar(&opts.collection, "collection", "top-1m", "")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -94,6 +119,24 @@ func parseOptions() *Options {
 	opts.server = tryAddDefaultPort(opts.server, defaults.Do53Port)
 
 	return &opts
+}
+
+func connectToDatabase(collection string) *mongo.Client {
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found")
+	}
+
+	uri := os.Getenv("MONGODB_URI")
+	if uri == "" {
+		log.Fatal("You must set your 'MONGODB_URI' environment variable. See\n\t https://www.mongodb.com/docs/drivers/go/current/usage-examples/#environment-variable")
+	}
+
+	client, err := mongo.Connect(context.TODO(), options.Client().ApplyURI(uri))
+	if err != nil {
+		panic(err)
+	}
+
+	return client
 }
 
 func processFile(path string, ch chan<- string) {
@@ -125,6 +168,15 @@ func processFile(path string, ch chan<- string) {
 func main() {
 	opts := parseOptions()
 
+	mongoClient := connectToDatabase(opts.collection)
+	collection := mongoClient.Database("services").Collection(opts.collection)
+
+	defer func() {
+		if err := mongoClient.Disconnect(context.TODO()); err != nil {
+			panic(err)
+		}
+	}()
+
 	var wg sync.WaitGroup
 	inch := make(chan string, opts.numWorkers)
 	outch := make(chan string, opts.numWorkers)
@@ -142,7 +194,6 @@ func main() {
 			}
 
 			var c dnsclient.Client
-			//c = dnsclient.NewDo53Client(config)
 
 			defer func() {
 				wg.Done()
@@ -163,18 +214,26 @@ func main() {
 				var sb strings.Builder
 				sb.WriteString("\n" + domainname + "\n")
 
+				var serviceRecord ServiceDiscovery
+				serviceRecord.Domain = domainname
+
 				browsers, err := dnsclient.GetAllServiceBrowserDomains(c, domainname)
 				_ = err
 				if browsers != nil {
 					// fmt -> stringbuilder for outch
 					sb.WriteString("Service Browser Domains:\n")
+
+					var browsingDomains []string
 					for _, browser := range browsers {
 						sb.WriteString(fmt.Sprintf("\t%s\n", browser)) // sprintf returns string
+						browsingDomains = append(browsingDomains, browser)
 					}
+					serviceRecord.BrowsingDomains = browsingDomains
 				} else {
 					// if we don't find any browsing domains, treat the original
 					// domain as the browsing domain
 					browsers = []string{domainname}
+					serviceRecord.BrowsingDomains = browsers
 				}
 
 				serviceSet := set.New[string]()
@@ -190,20 +249,42 @@ func main() {
 
 				if len(services) != 0 {
 					sb.WriteString("Services:\n")
+
+					var listOfServices []Service
 					for _, service := range serviceSet.Items() {
 						sb.WriteString(fmt.Sprintf("\t%s\n", service))
+
 						instances, err := dnsclient.GetServiceInstances(c, service)
 						if err != nil {
 							continue
 						}
 						for _, instance := range instances {
+							var service Service
+							service.Name = instance
+
 							info, err := dnsclient.GetServiceInstanceInfo(c, instance)
 							if err != nil {
 								continue
 							}
+
 							sb.WriteString(fmt.Sprintf("\t\t%v\n", info))
+
+							service.Priority = info.Priority
+							service.Weight = info.Weight
+							service.Port = info.Port
+							service.Target = info.Target
+							service.Txt = info.Txt
+
+							listOfServices = append(listOfServices, service)
 						}
 					}
+
+					serviceRecord.Services = listOfServices
+					result, err := collection.InsertOne(context.TODO(), serviceRecord)
+					if err != nil {
+						panic(err)
+					}
+					_ = result
 				}
 
 				outputString := sb.String()
