@@ -10,6 +10,6 @@ const (
 	DoTServer  = "1.1.1.1:853"
 	DoTPort    = "853"
 	DoHURL     = "https://cloudflare-dns.com/dns-query"
-	Timeout    = 2 * time.Second
+	Timeout    = 6 * time.Second
 	MaxCNAMEs  = 0
 )

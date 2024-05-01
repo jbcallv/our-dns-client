@@ -40,9 +40,11 @@ func (c *Do53Client) GetConfig() *Config {
 func (c *Do53Client) Dial() error {
 	var err error
 	c.conn, err = c.client.Dial(c.config.Server)
+
 	if err != nil {
 		return fmt.Errorf("failed to connect to DNS server: %w", err)
 	}
+
 	return nil
 }
 

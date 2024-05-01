@@ -65,12 +65,13 @@ type Options struct {
 	// positional
 	domain string
 	// options
-	server     string
-	tcp        bool
-	timeout    time.Duration
-	numWorkers int
-	inputFile  string
-	collection string
+	server       string
+	tcp          bool
+	timeout      time.Duration
+	numWorkers   int
+	inputFile    string
+	collection   string
+	retryWithTcp bool
 }
 
 type Service struct {
@@ -106,6 +107,7 @@ func parseOptions() *Options {
 	// general options
 	flag.StringVar(&opts.server, "server", defaults.Do53Server, "")
 	flag.BoolVar(&opts.tcp, "tcp", false, "")
+	flag.BoolVar(&opts.retryWithTcp, "retry-tcp", false, "")
 	flag.IntVar(&opts.numWorkers, "num-workers", 1, "")
 	flag.DurationVar(&opts.timeout, "timeout", defaults.Timeout, "")
 	flag.StringVar(&opts.collection, "collection", "top-1m", "")
@@ -182,34 +184,55 @@ func main() {
 	outch := make(chan string, opts.numWorkers)
 	wg.Add(opts.numWorkers)
 
+	config := &dnsclient.Do53Config{
+		Config: dnsclient.Config{
+			RecursionDesired: true,
+			Timeout:          opts.timeout,
+		},
+		UseTCP: opts.tcp,
+		Server: opts.server,
+	}
+
+	// for tcp retry
+	configTcp := &dnsclient.Do53Config{
+		Config: dnsclient.Config{
+			RecursionDesired: true,
+			Timeout:          opts.timeout,
+		},
+		UseTCP: true,
+		Server: opts.server,
+	}
+
+	var cTcp dnsclient.Client
+	var c dnsclient.Client
+
+	defer func() {
+		wg.Done()
+		if c != nil {
+			c.Close()
+		}
+		if cTcp != nil {
+			cTcp.Close()
+		}
+	}()
+
+	cTcp = dnsclient.NewDo53Client(configTcp)
+
+	err := cTcp.Dial()
+	if err != nil {
+		mu.Fatalf("failed to connect to DNS server (tcp): %v", err)
+	}
+	defer cTcp.Close()
+
+	c = dnsclient.NewDo53Client(config)
+	err = c.Dial()
+	if err != nil {
+		mu.Fatalf("failed to connect to DNS server: %v", err)
+	}
+	defer c.Close()
+
 	for i := 0; i < opts.numWorkers; i++ {
 		go func() {
-			config := &dnsclient.Do53Config{
-				Config: dnsclient.Config{
-					RecursionDesired: true,
-					Timeout:          opts.timeout,
-				},
-				UseTCP: opts.tcp,
-				Server: opts.server,
-			}
-
-			var c dnsclient.Client
-
-			defer func() {
-				wg.Done()
-				if c != nil {
-					c.Close()
-				}
-			}()
-
-			c = dnsclient.NewDo53Client(config)
-
-			err := c.Dial()
-			if err != nil {
-				mu.Fatalf("failed to connect to DNS server: %v", err)
-			}
-			defer c.Close()
-
 			for domainname := range inch {
 				var sb strings.Builder
 				sb.WriteString("\n" + domainname + "\n")
@@ -240,7 +263,15 @@ func main() {
 				for _, browser := range browsers {
 					services, err := dnsclient.GetServices(c, browser)
 					if err != nil {
-						continue
+						// tcp retry:
+						if opts.retryWithTcp {
+							services, err = dnsclient.GetServices(cTcp, browser)
+							if err != nil {
+								continue
+							}
+						} else {
+							continue
+						}
 					}
 					serviceSet.Add(services...)
 				}
